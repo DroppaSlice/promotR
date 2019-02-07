@@ -1,0 +1,169 @@
+---
+title: "promotR Vignette"
+author: "Dennis Zhu"
+date: "February 7, 2019"
+output:
+  html_document:
+  df_print: paged
+highlight: textmate
+self_contained: no
+theme: flatly
+toc: yes
+toc_float:
+  smooth_scroll: yes
+---
+##Misc Setup
+
+```{r setup}
+library(Biostrings)
+library(GenomicFeatures)
+library(knitr)
+```
+
+```{r Shell TSS map}
+shell_tss <- read.csv("/Users/Dennis/Documents/Bioinformatics/Shell_2015_Mtb_TSSmap.csv", header=T, stringsAsFactors = F)
+str(shell_tss)
+colnames(shell_tss) <- c(c("TSS.unique.name", "strand", "genome.position", "mean.coverage", "downstream.gene", "pos.relative.to.downstream.gene", "overlapping.gene", "position.in.overlapping", "pos.overlap.relative", "+1 NT"))
+
+```
+
+```{r Mtb genome}
+mtb_genome_erd <- readDNAStringSet("/Users/Dennis/Documents/Bioinformatics/genome_sequences/Mtb_Erdman_genome_sequence.fa.gz", format="fasta")
+mtb_genome_rv <- readDNAStringSet("/Users/Dennis/Documents/Bioinformatics/genome_sequences/Mtb_H37Rv_genome_sequence.fa.gz", format="fasta")
+width(mtb_genome_erd)
+width(mtb_genome_rv)
+```
+
+##promotR_closest
+
+Here is the code for *promotR_closest*, which is a little bit of code that performs the following task: given a table of transcription start sites and their downstream gene, the code will identify any gene with multiple upstream TSS and reduce the table to only a list of the closest upstream TSS. 
+
+*Note to self:* This is the slowest code that man has ever written... how can we make this faster. Would it be faster to initialize a "keep" vector with length = nrow and adjust the values versus the current method of appending each loop? 
+  
+  IDK, either way, this code is very slow for what it does. 
+
+```{r Function: promotR_closest}
+promotR_closest <- function(TSS_list){
+  require(dplyr)
+  TSS_list<- arrange(TSS_list, downstream.gene)
+  n_orig <- nrow(TSS_list)
+  keep <- c()
+  for(i in 1:n_orig){
+    #special conditions for the first & last row of the df
+    if(i == 1){
+      #skip if not a duplicate
+      if(TSS_list[i,"downstream.gene"]!=TSS_list[i+1,"downstream.gene"]){
+        keep <- append(keep,T)
+      }
+      #the meat of what to do; if further remove, else keep
+      else{
+        if(abs(TSS_list[i,"pos.relative.to.downstream.gene"]) > abs(TSS_list[i+1, "pos.relative.to.downstream.gene"])){
+          keep <- append(keep,F)
+        }
+        else{
+          keep <-  append(keep,T)
+        }
+      }
+    }
+    else if(i==n_orig){
+      if(TSS_list[i,"downstream.gene"]!=TSS_list[i-1,"downstream.gene"]){
+        keep <- append(keep,T)
+      }
+      else{
+        if(abs(TSS_list[i,"pos.relative.to.downstream.gene"])>abs(TSS_list[i-1,"pos.relative.to.downstream.gene"])){
+          keep <- append(keep,F)
+        }
+        else{
+          keep <- append(keep,T)
+        }
+      }
+    }
+    else{
+      if(TSS_list[i,"downstream.gene"]!=TSS_list[i+1,"downstream.gene"] & TSS_list[i,"downstream.gene"]!=TSS_list[i-1,"downstream.gene"]){
+        keep<-append(keep,T)
+      }
+      else{
+        if(abs(TSS_list[i,"pos.relative.to.downstream.gene"])>abs(TSS_list[i+1,"pos.relative.to.downstream.gene"]) & TSS_list[i,"downstream.gene"]==TSS_list[i+1,"downstream.gene"] | abs(TSS_list[i,"pos.relative.to.downstream.gene"])>abs(TSS_list[i-1,"pos.relative.to.downstream.gene"]) & TSS_list[i,"downstream.gene"]==TSS_list[i-1,"downstream.gene"]){
+          keep<-append(keep,F)
+        }
+        else{
+          keep<-append(keep,T)
+        }
+      }
+    }
+  }
+  new_df <- TSS_list[keep,]
+  row.names(new_df) <- new_df[,"downstream.gene"]
+  print(paste(nrow(TSS_list)-nrow(new_df),"duplicate TSS removed from table"))
+  print(length(keep))
+  print(head(keep,10))
+  new_df
+}
+```
+
+```{r}
+shell_tss_closest<- promotR_closest(shell_tss)
+```
+Here is our original table, which is a list generated from Shell et al. 2015's work:
+
+```{r}
+head(shell_tss)
+```
+
+Here is the same table after running our code:
+
+```{r}
+head(shell_tss_closest)
+```
+
+##promotR_grab
+
+The goal of the function **promotR_grab** is to extract a promoter sequence from a genome given a genome position tied to a specific transcription start site. As it's currently written, it 
+
+**Arguments**
+  promotR_grab takes 4 arguments:
+  
+  * *x* should be some sort of one-dimensional array (vector, data frame row, matrix row) that contains a unique TSS identifies in the 1 position, strand information in the 2 position, the downstream gene in the 5 position, and the physical location of the TSS in the genome in the 3 position. It's a bit complicated, but it's written this way because that's the organization of the Shell dataset. Maybe I'll write something else that can reformat other tables... but that's for another day. 
+
+* *seq* should be a DNAStringSet object that contains the genome sequence that you are looking to extract promoters from. For right now, promotR_grab can only handle genomes that contain a single chromosome. This is something that I'm going to keep developing in later versions.
+
+* *upstream* number of base pairs upstream to be added to the promoter sequence. Default = 40
+
+* *downstream* number of base pairs downstream of the TSS to add to the promoter sequence. The TSS will always be a part of the extracted sequence. For example, if downstream = 0, the promoter sequence will stop at the +1 TSS position. Default = 0
+
+The output of the function will be a vector with 3 elements: the unique TSS identifier, the downstream gene, and the promoter sequence. 
+
+Finally, finally got this to work! It's a bit of a pain, and this might not be the most efficient way to do this, but the key to getting this all to work was to make sure that data frame rows are converted into character vectors. We force this using the as.character(as.vector()) functions. Then, we re-convert the TSS genome position into a 
+
+```{r Function:promotR_grab}
+promotR_grab <- function(x, seq, upstream = 40, downstream = 0){
+require(Biostrings)
+result <- vector(mode="character", length=3)
+names(result) <- c("unique.id", "downstream.gene", "promoter.sequence")
+x <- as.character(as.vector(x))
+result[1] <- as.character(x[1])
+result[2] <- as.character(x[5])
+genome.position <- as.numeric(x[3])
+comp <- complement(seq)
+if(x[2]=="+"){
+result[3] <- toString(subseq(seq, start=(genome.position - upstream), end=(genome.position + downstream)))
+}
+else{
+result[3] <- toString(subseq(comp, start=(genome.position - downstream), end=(genome.position + upstream)))
+}
+return(result)
+}
+
+```
+
+```{r row_1}
+row_1 <- shell_tss_closest[1,]
+promotR_grab(row_1, mtb_genome_rv)
+```
+
+```{r extract from shell closest TSS}
+shell_promoters_closest <- apply(shell_tss_closest, MARGIN=1, FUN=promotR_grab, seq=mtb_genome_rv)
+shell_promoters_closest <- t(shell_promoters_closest)
+head(as.data.frame(shell_promoters_closest))
+```
+
